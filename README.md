@@ -4,9 +4,9 @@ A tool for parsing and analyzing Out-Of-Memory (OOM) events from SingleStore eng
 
 ## Features
 
-- Identifies OOM events by thread ID and NTID
+- Identifies distinct OOM events by thread ID and NTID
 - Extracts memory allocation information in a hierarchical format
-- Summarizes query memory usage by aggregator
+- Summarizes query memory usage by aggregator activity
 - Visualizes memory allocator data in a tree-like structure
 - Supports output to file or console
 
