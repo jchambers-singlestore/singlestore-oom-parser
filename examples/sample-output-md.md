@@ -1,3 +1,6 @@
+# SingleStore OOM Parser Example Output
+
+```
 Found 2 OOM events
 ==================================================
 
@@ -76,3 +79,17 @@ Memory Allocator Tree:
 └─ | Alloc_variable_allocated | 601.5 MB |
 
 ==================================================
+```
+
+## Analysis
+
+The example output shows two OOM events detected in a SingleStore engine log:
+
+1. The first event occurred at 14:25:07 and shows a total query memory consumption of 15.6 GB
+2. The second event occurred at 21:03:33 and shows a much higher total query memory consumption of 40.5 GB
+
+In both cases, the same two queries were running:
+- `Select_glblFahBusEventDtl_005aefe35e8db03d`
+- `Select_glblLyltTrans_89c7b2ae8f7a8e3f`
+
+The memory allocator tree provides a detailed breakdown of how memory was being used at the time of the OOM event. This helps identify which components were consuming the most memory and where optimization efforts should be focused.
