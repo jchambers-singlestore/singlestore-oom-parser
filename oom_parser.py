@@ -7,40 +7,56 @@ from datetime import datetime
 class OOMEventParser:
     def __init__(self):
         self.oom_events = []
+        self.verbose = False
 
     def detect_log_format(self, filename):
         """Detect the format of the log file by examining a sample of lines"""
         standard_format_count = 0
         alternative_format_count = 0
-        
+
         with open(filename, 'r') as file:
             # Check first 100 lines or all lines if fewer
             for i, line in enumerate(file):
                 if i >= 100:
                     break
-                    
-                # Standard format usually has: error (YYYY-MM-DD HH:MM:SS.SSS) Thread 
+
+                # Standard format usually has: error (YYYY-MM-DD HH:MM:SS.SSS) Thread
                 std_format = re.search(r'(error|info|warning) \((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\) Thread', line)
                 if std_format:
                     standard_format_count += 1
-                    
+
                 # Alternative format has multiple patterns
                 alt_format1 = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})  (ERROR|INFO|WARNING):', line)
                 alt_format2 = re.search(r'(error|info|warning) \((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\) (?!Thread)', line)
-                if alt_format1 or alt_format2:
+                
+                # Another alternative format sometimes appears in logs
+                alt_format3 = re.search(r'\d+ (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+(INFO|ERROR|WARNING):', line)
+                
+                if alt_format1 or alt_format2 or alt_format3:
                     alternative_format_count += 1
-                    
+
         return "alternative" if alternative_format_count > standard_format_count else "standard"
 
     def parse_file(self, filename):
         # Detect format first
         log_format = self.detect_log_format(filename)
-        
+        if self.verbose:
+            print(f"Detected log format: {log_format}")
+
         # Dictionary to track events by thread identifiers
         events = {}
+        # Dictionary to track all OOM errors by timestamp
+        oom_timestamps = defaultdict(int)
 
         with open(filename, 'r') as file:
             for line in file:
+                # Track any OOM errors to confirm real OOM events
+                if "ReportOOMError" in line or "buffer manager memory allocation failure" in line:
+                    timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})', line)
+                    if timestamp_match:
+                        timestamp_str = timestamp_match.group(1)
+                        oom_timestamps[timestamp_str] += 1
+                
                 # Try to extract timestamp
                 timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})', line)
                 if not timestamp_match:
@@ -48,10 +64,11 @@ class OOMEventParser:
 
                 timestamp_str = timestamp_match.group(1)
                 timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
-                
+
                 # Extract thread information based on format
                 thread_match = None
-                
+
+                # Try different thread pattern formats
                 if log_format == "standard":
                     thread_match = re.search(r'Thread (\d+) \(ntid (\d+), conn id (-?\d+)\)', line)
                 else:
@@ -65,6 +82,11 @@ class OOMEventParser:
                         segment_match = re.search(r'Segment .+ \| Thread (\d+) \(ntid (\d+), conn id (-?\d+)\)', line)
                         if segment_match:
                             thread_match = segment_match
+                    if not thread_match:
+                        # Alternative format commonly found in logs
+                        alt_match = re.search(r'Thread (\d+) \(ntid (\d+), conn id (\d+|\-\d+)\)', line)
+                        if alt_match:
+                            thread_match = alt_match
                     if not thread_match:
                         # Last resort pattern with just Thread ID and NTID
                         last_match = re.search(r'Thread (\d+) \(ntid (\d+)', line)
@@ -93,10 +115,15 @@ class OOMEventParser:
                         'timestamp': timestamp,
                         'allocator_data': [],
                         'query_memory': defaultdict(float),
-                        'query_names': {}
+                        'query_names': {},
+                        'is_oom': False
                     }
 
                 current_event = events[thread_key]
+
+                # Mark if this is an OOM event
+                if "ReportOOMError" in line or "buffer manager memory allocation failure" in line:
+                    current_event['is_oom'] = True
 
                 # Process trace_SendRow lines (memory allocator dumps)
                 trace_match = re.search(r'trace_SendRow: (.*)', line)
@@ -126,7 +153,7 @@ class OOMEventParser:
                             value = ""
                             current_event['allocator_data'].append((key, value))
 
-                # Process query memory information
+                # Process query memory information - two different patterns
                 query_memory_match = re.search(r'Current query memory: (\d+\.\d+).*Activity name: (.*?) agg name: (.*?) Query text:', line)
                 if query_memory_match:
                     memory, activity_name, agg_name = query_memory_match.groups()
@@ -142,8 +169,12 @@ class OOMEventParser:
                     current_event['query_memory'][agg_name] += memory_value
                     current_event['query_names'][agg_name] = activity_name
 
-        # Convert to list and sort by timestamp
-        result = [event for event in events.values() if event['allocator_data']]
+        # Only keep events that are actually OOM events or have allocator data
+        # and have corresponding OOM messages in the logs
+        result = []
+        for event in events.values():
+            if event['allocator_data'] and (event['is_oom'] or oom_timestamps.get(event['timestamp'].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3], 0) > 0):
+                result.append(event)
         
         # Sort by timestamp
         result.sort(key=lambda e: e['timestamp'])
@@ -252,11 +283,13 @@ class OOMEventParser:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python oom_parser.py <logfile>")
+        print("Usage: python oom_parser.py <logfile> [--verbose]")
         sys.exit(1)
 
     logfile = sys.argv[1]
     parser = OOMEventParser()
+    parser.verbose = "--verbose" in sys.argv
+    
     oom_events = parser.parse_file(logfile)
 
     print(f"Found {len(oom_events)} OOM events")
